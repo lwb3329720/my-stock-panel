@@ -88,11 +88,11 @@ def test_next_open_placed_before_open_fills_same_day_open(data_dir, monkeypatch)
     assert got["fill_price"] == pytest.approx(paper.apply_slippage(10.2, "buy", 5.0))
 
 
-def test_etf_market_order_intraday_waits_for_next_open(data_dir, monkeypatch):
-    """ETF 即时单盘中自动转次日开盘: 同样不能按当日已过去的开盘价成交。"""
+def test_etf_explicit_next_open_waits_for_next_open(data_dir, monkeypatch):
+    """ETF 显式次日开盘单不能按当日已过去的开盘价成交。"""
     _freeze(monkeypatch, DAY, time(10, 30))
     paper.create_account(data_dir, 1_000_000)
-    order, err = paper.create_order(data_dir, ETF, "buy", qty=100, asset_type="etf", ref_price=10.5)
+    order, err = paper.create_order(data_dir, ETF, "buy", qty=100, asset_type="etf", ref_price=10.5, order_type="next_open")
     assert err is None and order["order_type"] == "next_open"
     assert paper.settle_day(data_dir, DAY.isoformat())["filled"] == 0
     assert paper.settle_day(data_dir, NEXT.isoformat())["filled"] == 1

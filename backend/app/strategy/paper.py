@@ -33,7 +33,7 @@ import shutil
 import threading
 import uuid
 from datetime import date as _date
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import time as _time
 from pathlib import Path
 
@@ -381,7 +381,7 @@ def create_order(
     """创建订单并校验。qty 与 amount 二选一 (amount 按参考价折算百股)。
 
     order_type: market(即时, 盘中钩子撮合) / next_open / close。
-    ETF 即时单自动转 next_open (盘中钩子只喂股票快照)。
+    股票和 ETF 即时单均由盘中行情钩子撮合。
     返回 (order, None) 或 (None, 错误信息)。
     """
     with PAPER_LOCK:
@@ -399,10 +399,6 @@ def create_order(
             return None, "symbol 不能为空"
         if asset_type is None:
             asset_type = "etf" if symbol.endswith((".SH", ".SZ")) and symbol.split(".")[0].startswith(("51", "56", "58", "15")) else "stock"
-
-        # ETF 即时单 → 次日开盘 (盘中钩子只喂股票快照)
-        if order_type == "market" and asset_type == "etf":
-            order_type = "next_open"
 
         if qty is None and amount is None:
             return None, "qty 与 amount 必须提供一个"
@@ -816,7 +812,7 @@ def evaluate_intraday(data_dir: Path, snapshot: dict[str, float], account_id: st
     """盘中钩子: 用最新快照价撮合 pending 即时单。返回本次成交事件列表。
 
     snapshot: {symbol: raw 最新价} (来自 enriched raw_close)。仅处理 market 单;
-    调用方 (quote_service) 已保证交易时段。ETF 不在快照内自然顺延。
+    调用方 (quote_service) 已保证交易时段。缺少有效快照的标的继续等待。
     事件由调用方广播 (SSE/语音/系统通知/留痕/Webhook), 域模块只产出不投递。
     """
     events: list[dict] = []
@@ -1106,6 +1102,9 @@ def overview(data_dir: Path, price_map: dict[str, float] | None = None, account_
         if pos["qty"] <= 0:
             continue
         price = (price_map or {}).get(symbol)
+        if price is None and pos.get("asset_type") == "etf":
+            # Include today's persisted raw close, but never a future partition.
+            price = _prev_close(data_dir, symbol, "etf", (cn_today() + timedelta(days=1)).isoformat())
         last = price if price is not None else pos["avg_cost"]
         mv += pos["qty"] * last
         holdings.append({

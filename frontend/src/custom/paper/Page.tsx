@@ -22,6 +22,7 @@ import { api, type PaperCompareRow, type PaperFill, type PaperHolding, type Pape
 import { QK } from '@/lib/queryKeys'
 import { selectableStrategies, strategyOptionLabel } from '@/lib/strategyLibrary'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
+import { useQuoteSubscription } from '@/lib/useQuoteSubscription'
 import { cn } from '@/lib/cn'
 import { fmtPct, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/components/stock-table/primitives'
@@ -621,6 +622,8 @@ function SuggestInput({
 /** 下单面板 */
 function OrderForm({ acc, holdings = [], onDone }: { acc: string; holdings?: PaperHolding[]; onDone: () => void }) {
   const [symbol, setSymbol] = useState('')
+  const quoteSymbol = symbol.trim().toUpperCase()
+  useQuoteSubscription(quoteSymbol, /^\d{6}\.(SH|SZ|BJ)$/.test(quoteSymbol))
   const [side, setSide] = useState<'buy' | 'sell'>('buy')
   const [qty, setQty] = useState('100')
   const [amount, setAmount] = useState('10000')
@@ -735,7 +738,7 @@ function OrderForm({ acc, holdings = [], onDone }: { acc: string; holdings?: Pap
               <button
                 key={t}
                 onClick={() => setOrderType(t)}
-                title={t === 'market' ? '盘中按最新快照价成交; ETF 即时单自动转次日开盘' : undefined}
+                title={t === 'market' ? '股票 / ETF 盘中按有效最新快照价撮合；无有效行情时等待' : undefined}
                 className={cn(
                   'flex-1 rounded-btn border py-1 text-[11px] transition-colors',
                   orderType === t ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-muted hover:text-secondary',

@@ -201,6 +201,17 @@ export function Financials() {
       />
 
       <div className="px-3 sm:px-8 py-6 space-y-6 max-w-7xl">
+        {Object.entries(status?.reports ?? {}).map(([table, report]) => (
+          <div key={table} className="rounded-card border px-3 py-2 text-xs">
+            {table}：已处理 {report.processed}/{report.total} 只，已保存 {report.rows} 行
+            {report.error_count > 0 && <details className="text-orange-500">
+              <summary>部分数据未同步：{report.error_count} 条异常（展示前 20 条）</summary>
+              {report.errors.map((error, index) => <div key={index}>
+                {error.symbol} {error.period_end}：{error.reason}
+              </div>)}
+            </details>}
+          </div>
+        ))}
         {syncing && (
           <div className="flex items-center gap-2 rounded-card border border-accent/30 bg-accent/[0.06] px-3 py-2 text-xs text-accent">
             <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />

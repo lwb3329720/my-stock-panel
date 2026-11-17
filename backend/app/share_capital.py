@@ -55,6 +55,9 @@ def apply_historical_float_shares(
     if "announce_date" in shares.columns:
         available_date = as_date_expr("announce_date").fill_null(available_date)
 
+    if "available_date" in shares.columns:
+        available_date = as_date_expr("available_date").fill_null(available_date)
+
     history = (
         shares
         .select(

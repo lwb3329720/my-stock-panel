@@ -8,6 +8,12 @@ import type { NavLayout } from './navLayout'
 
 const BASE = ''
 
+export function queryLocalResearch(body: { kind: string; symbol: string; day: string; refresh: boolean }) {
+  return request<Record<string, unknown>>('/api/custom/local-research/query', {
+    method: 'POST', body: JSON.stringify(body), timeoutMs: 180_000,
+  })
+}
+
 type RequestOptions = RequestInit & {
   responseType?: 'json' | 'blob'
   /** 为 true 时不弹错误 toast（由调用方自行汇总提示，如多图串行队列） */
@@ -122,6 +128,7 @@ export interface CapabilitiesResponse {
 
 // ===== Financials =====
 export interface FinancialStatus {
+  reports?: Record<string, { processed: number; total: number; rows: number; error_count: number; errors: { symbol?: string; period_end?: string; reason: string }[] }>
   available: boolean
   tables: Record<string, { rows: number; symbols: number }>
   last_sync: Record<string, string>

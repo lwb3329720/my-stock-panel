@@ -1166,6 +1166,12 @@ def _codex_process_env(codex_home_path: Path) -> dict[str, str]:
         if value:
             env[name] = value
             seen.add(normalized)
+    proxy_url = os.environ.get("AI_CODEX_PROXY_URL", "").strip()
+    if proxy_url:
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            env.pop(name, None)
+        env["HTTP_PROXY"] = proxy_url
+        env["HTTPS_PROXY"] = proxy_url
     provider = _active_codex_provider(_read_codex_config())
     if provider:
         key = provider[1].get("env_key")

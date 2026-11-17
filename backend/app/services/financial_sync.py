@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
 import logging
 import threading
 from datetime import datetime, timezone
@@ -209,6 +211,28 @@ def _sync_history_table_for_symbols(
     被冲掉, 财务因子将永远只有单期快照, 任何回测都是未来函数。
     """
     existing = get_financial_df(data_dir, table)
+    if _financial_is_custom():
+        from app.services import preferences
+        from app.data_providers import custom as custom_sources
+        provider = custom_sources.get_provider(preferences.get_financial_provider())
+        batch_size = getattr(provider, "financial_batch_size", None)
+        if batch_size:
+            errors = []
+            count = existing.height
+            for offset in range(0, len(symbols), batch_size):
+                incoming = provider.get_financials(table, symbols[offset:offset + batch_size], latest_only=False)
+                errors.extend(getattr(provider, "financial_errors", []))
+                existing = _merge_report_history(existing, incoming)
+                count = _write_table(table, existing, data_dir)
+                report = {"table": table, "processed": min(offset + batch_size, len(symbols)),
+                          "total": len(symbols), "errors": errors, "rows": count,
+                          "updated_at": datetime.now(timezone.utc).isoformat()}
+                path = data_dir / "financials" / f"{table}-sync-report.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+                tmp.replace(path)
+            return count
     if existing.is_empty() or not {"symbol", "period_end"} <= set(existing.columns):
         return _sync_table(table, symbols, data_dir, capset, latest_only=False)
 
@@ -377,6 +401,13 @@ class FinancialScheduler:
         持久化确保即使重启,前端 /status 仍返回真实的最后同步时间,
         不会错误地显示"尚未同步"。
         """
+        report_path = self._data_dir / "financials" / f"{table}-sync-report.json"
+        from app.services import preferences
+        if preferences.get_financial_provider() == "tushare" and report_path.exists():
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            if report.get("errors"):
+                logger.warning("financial %s partially synchronized; see %s", table, report_path.name)
+                return
         ts = datetime.now(timezone.utc).isoformat()
         self._last_sync[table] = ts
         try:
@@ -457,6 +488,27 @@ class FinancialScheduler:
         # 全部同步
         symbols = _get_symbols(self._data_dir)
         result: dict[str, int] = {}
+        from app.services import preferences
+        if preferences.get_financial_provider() == "tushare":
+            failed = []
+            with ThreadPoolExecutor(max_workers=5, thread_name_prefix="financial-table") as pool:
+                futures = {
+                    pool.submit(_sync_history_table_for_symbols, t, symbols, self._data_dir, self._capset): t
+                    for t in FINANCIAL_TABLES
+                }
+                for future in as_completed(futures):
+                    t = futures[future]
+                    try:
+                        result[t] = future.result()
+                    except Exception:  # noqa: BLE001 -- isolate table failures
+                        failed.append(t)
+                        logger.exception("financial table %s failed; other tables continue", t)
+                    else:
+                        self._record_sync(t)
+            _refresh_financials_views(self._data_dir)
+            if failed:
+                raise RuntimeError(f"Financial tables failed: {', '.join(sorted(failed))}")
+            return result
         for t in FINANCIAL_TABLES:
             result[t] = _sync_history_table_for_symbols(
                 t, symbols, self._data_dir, self._capset

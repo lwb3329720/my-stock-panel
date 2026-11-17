@@ -99,13 +99,15 @@ def test_create_order_rejects_bad_qty_and_insufficient_cash(tmp_path):
     assert "资金不足" in err
 
 
-def test_create_order_etf_market_converts_to_next_open(tmp_path):
+def test_create_order_etf_market_fills_intraday(tmp_path):
     _cap_account(tmp_path)
     order, err = paper.create_order(
         tmp_path, "510300.SH", "buy", qty=1000, order_type="market", asset_type="etf", ref_price=4.0,
     )
     assert err is None
-    assert order["order_type"] == "next_open"
+    assert order["order_type"] == "market"
+    assert paper.evaluate_intraday(tmp_path, {}) == []
+    assert len(paper.evaluate_intraday(tmp_path, {"510300.SH": 4.063})) == 1
 
 
 def test_sell_requires_holding_and_t1(tmp_path, monkeypatch):

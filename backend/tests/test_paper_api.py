@@ -166,3 +166,31 @@ def test_compare_accounts(client: TestClient):
     # 字段完整性 (对比表依赖)
     for key in ("cash", "market_value", "total_pnl", "profit_loss_ratio", "max_drawdown", "avg_holding_days", "realized_pnl"):
         assert key in row
+
+
+def test_etf_amount_uses_live_reference_without_daily_history(client):
+    client.post("/api/paper/account", json={"initial_cash": 100000})
+    client.app.state.quote_service = SimpleNamespace(
+        paper_etf_snapshot=lambda: {"159915.SZ": 2.4},
+    )
+    response = client.post("/api/paper/orders", json={"symbol": "159915.SZ", "side": "buy", "amount": 10000})
+    assert response.status_code == 200
+    assert response.json()["order"]["qty"] == 4100
+    assert response.json()["order"]["ref_price"] == 2.4
+
+
+def test_amount_reference_reads_daily_partitions_with_new_quote_timestamp(client):
+    from datetime import date
+    import polars as pl
+    from app.strategy import paper
+
+    root = paper._daily_path(client.app.state.repo.store.data_dir, "stock")
+    for day, price, extra in [(date(2026, 11, 13), 5.0, {}), (date(2026, 11, 16), 6.0, {"quote_ts": [1794795000000]})]:
+        folder = root / f"date={day}"
+        folder.mkdir(parents=True)
+        pl.DataFrame({"symbol": ["002668.SZ"], "date": [day], "close": [price], **extra}).write_parquet(folder / "part.parquet")
+    client.post("/api/paper/account", json={"initial_cash": 100000})
+    response = client.post("/api/paper/orders", json={"symbol": "002668.SZ", "side": "buy", "amount": 10000})
+    assert response.status_code == 200
+    assert response.json()["order"]["ref_price"] == 6.0
+    assert response.json()["order"]["qty"] == 1600

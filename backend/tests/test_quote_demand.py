@@ -271,3 +271,49 @@ def test_temporarily_unreadable_watchlist_keeps_market_and_detail_demand(market,
     service.subscribe_quotes('detail', ['000300.SH'])
     service._fetch_full_market_quotes()
     assert {'000985.SH', '000300.SH', '159558.SZ'} <= set(quotes.get.call_args.kwargs['symbols'])
+
+
+def test_pending_paper_etf_joins_demand_without_open_page(market):
+    from app.strategy import paper
+    service, quotes, _ = market
+    root = service._repo.store.data_dir
+    paper.create_account(root, 100000)
+    order, error = paper.create_order(root, "510300.SH", "buy", qty=100, asset_type="etf")
+    assert error is None
+    service._fetch_full_market_quotes()
+    assert "510300.SH" in quotes.get.call_args.kwargs["symbols"]
+    paper.cancel_order(root, order["id"])
+    service._fetch_full_market_quotes()
+    assert "510300.SH" not in quotes.get.call_args.kwargs["symbols"]
+
+
+def testpaper_etf_snapshot_rejects_stale_missing_and_invalid_quotes(market, monkeypatch):
+    service, _, _ = market
+    monkeypatch.setattr(quote_service.time, "time", lambda: 1800000000)
+    service._paper_etf_records = [
+        {"symbol": "fresh", "last_price": 4.063, "timestamp": 1800000000000},
+        {"symbol": "stale", "last_price": 4, "timestamp": 1799999879000},
+        {"symbol": "missing", "last_price": 4},
+        {"symbol": "invalid", "last_price": float("nan"), "timestamp": 1800000000000},
+        {"symbol": "future", "last_price": 4, "timestamp": 1800000010000},
+    ]
+    assert service.paper_etf_snapshot() == {"fresh": 4.063}
+
+
+@pytest.mark.parametrize("trading,age,filled", [(True, 0, True), (True, 121, False), (False, 0, False)])
+def test_etf_only_market_poll_fills_without_stock_snapshot(market, monkeypatch, trading, age, filled):
+    from app.strategy import paper
+    service, _, _ = market
+    root = service._repo.store.data_dir
+    paper.create_account(root, 100000)
+    order, _ = paper.create_order(root, "510300.SH", "buy", qty=100, asset_type="etf")
+    service._app_state = SimpleNamespace(repo=service._repo)
+    service._paper_etf_records = [{"symbol": "510300.SH", "last_price": 4.063,
+                                   "timestamp": (quote_service.time.time() - age) * 1000}]
+    monkeypatch.setattr(service, "_is_continuous_trading", lambda: trading)
+    monkeypatch.setattr(service, "get_enriched_today", lambda: (pl.DataFrame(), None))
+    monkeypatch.setattr(service, "_broadcast_alerts", lambda events: None)
+    monkeypatch.setattr(service, "_maybe_send_system_notifications", lambda events: None)
+    monkeypatch.setattr(service, "_maybe_send_paper_webhook", lambda events: None)
+    service._evaluate_monitors(pl.DataFrame(), None)
+    assert (paper.get_order(root, order["id"])["status"] == "filled") is filled

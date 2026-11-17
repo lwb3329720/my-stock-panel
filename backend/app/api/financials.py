@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import json
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Request
@@ -60,11 +61,18 @@ def financial_status(request: Request):
 
     fs = getattr(request.app.state, "financial_scheduler", None)
     last_sync = fs.last_sync if fs else {}
+    reports = {}
+    for table in FINANCIAL_TABLES:
+        path = data_dir / "financials" / f"{table}-sync-report.json"
+        if path.exists():
+            report = json.loads(path.read_text(encoding="utf-8"))
+            reports[table] = {**report, "errors": report["errors"][:20], "error_count": len(report["errors"])}
 
     return {
         "available": True,
         "tables": tables,
         "last_sync": last_sync,
+        "reports": reports,
         # 服务端是否正在同步(手动触发)——前端据此显示"同步中"并防重复点击,
         # 且刷新页面后仍能正确反映服务端状态。
         "syncing": bool(fs and fs.is_syncing),

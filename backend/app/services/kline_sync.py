@@ -409,19 +409,29 @@ def sync_and_persist_daily_batch(
                     )),
                     repo,
                 ))
-            df = provider.get_daily(
-                symbols,
-                start_time=start_time,
-                end_time=end_time,
-                on_chunk_done=on_chunk_done,
-            )
+            resume_root = None
+            if getattr(provider, "daily_resume_batch_size", None):
+                df, resume_root = _fetch_resumable_daily(
+                    provider, symbols, start_time, end_time, repo.store.data_dir, on_chunk_done,
+                )
+            else:
+                df = provider.get_daily(
+                    symbols,
+                    start_time=start_time,
+                    end_time=end_time,
+                    on_chunk_done=on_chunk_done,
+                )
             if df.is_empty():
+                if resume_root:
+                    shutil.rmtree(resume_root)
                 return _finalize(0)
             if "symbol" in df.columns:
                 seen.update(df["symbol"].cast(pl.Utf8).unique().to_list())
             repo.append_daily(df)
             d = repo.store.data_dir.as_posix()
             repo.refresh_view("kline_daily", f"{d}/kline_daily/**/*.parquet")
+            if resume_root:
+                shutil.rmtree(resume_root)
             return _finalize(df.height)
         # 自定义源未配置 daily → 回退 TickFlow
 
@@ -453,6 +463,30 @@ def sync_and_persist_daily_batch(
     repo.refresh_view("kline_daily", f"{d}/kline_daily/**/*.parquet")
 
     return _finalize(df.height)
+
+
+def _fetch_resumable_daily(provider, symbols, start_time, end_time, data_dir, on_chunk_done=None):
+    # Include the whole request: never reuse another date range or provider's data.
+    request = {"version": 1, "provider": provider.name, "symbols": symbols,
+               "start": start_time.date().isoformat(), "end": end_time.date().isoformat()}
+    key = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
+    root = Path(data_dir) / "daily_sync_resume" / key
+    root.mkdir(parents=True, exist_ok=True)
+    frames = []
+    batches = list(chunked(symbols, provider.daily_resume_batch_size))
+    for index, batch in enumerate(batches):
+        path = root / f"{index}.parquet"
+        if path.exists():
+            frame = pl.read_parquet(path)
+        else:
+            frame = provider.get_daily(batch, start_time=start_time, end_time=end_time)
+            # The atomic rename is the completion marker, including valid empty results.
+            _atomic_write_parquet(frame, path)
+        if not frame.is_empty():
+            frames.append(frame)
+        if on_chunk_done:
+            on_chunk_done(index + 1, len(batches))
+    return (pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()), root
 
 
 def _persist_daily_chunks(chunks, repo: KlineRepository) -> int:

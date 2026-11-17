@@ -586,6 +586,21 @@ def test_codex_process_env_excludes_application_secrets(monkeypatch, tmp_path):
     assert "AUTH_PASSWORD" not in env
 
 
+def test_codex_proxy_applies_only_to_child_environment(monkeypatch, tmp_path):
+    monkeypatch.setattr(ai_provider, "_read_codex_config", lambda: {})
+    monkeypatch.setenv("AI_CODEX_PROXY_URL", "http://127.0.0.1:7890")
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.setenv("https_proxy", "http://old-proxy")
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    parent_env = dict(os.environ)
+    env = ai_provider._codex_process_env(tmp_path / "codex-home")
+    assert env["HTTPS_PROXY"] == "http://127.0.0.1:7890"
+    assert env["HTTP_PROXY"] == "http://127.0.0.1:7890"
+    assert "https_proxy" not in env
+    assert env["NO_PROXY"] == "localhost,127.0.0.1"
+    assert dict(os.environ) == parent_env
+
+
 def test_codex_process_env_injects_provider_env_key(monkeypatch, tmp_path):
     """config.toml 里 env_key 指向的凭证应显式注入子进程环境 (正向覆盖)。"""
     monkeypatch.setattr(ai_provider, "_active_codex_provider", lambda config: (

@@ -77,7 +77,10 @@ def _last_close(data_dir: Path, symbol: str, asset_type: str) -> float | None:
     try:
         import polars as pl
         df = (
-            pl.scan_parquet((base / "**" / "*.parquet").as_posix())
+            pl.scan_parquet(
+                (base / "**" / "*.parquet").as_posix(),
+                missing_columns="insert", extra_columns="ignore",
+            )
             .filter(pl.col("symbol") == symbol)
             .sort("date")
             .select(pl.col("close").last())
@@ -132,6 +135,36 @@ def delete_account(request: Request, force: bool = False, account: str = Query(p
     return {"ok": True, "deleted": _acc(request, account), **(result or {})}
 
 
+def _valuation_snapshot(request: Request) -> dict[str, float]:
+    """Share raw valuation prices across overview and comparison, including ETFs."""
+    import math
+
+    from app.market_time import cn_today
+
+    snapshot: dict[str, float] = {}
+    qs = getattr(request.app.state, "quote_service", None)
+    repo = request.app.state.repo
+    sources = []
+    if qs is not None:
+        sources.append(qs.get_enriched_today)
+    if hasattr(repo, "get_enriched_latest_asset"):
+        sources.append(lambda: repo.get_enriched_latest_asset("etf", refresh=False))
+    for source in sources:
+        try:
+            frame, day = source()
+            if day == cn_today() and not frame.is_empty():
+                snapshot.update({
+                    symbol: float(price)
+                    for symbol, price in zip(frame["symbol"], frame["raw_close"], strict=False)
+                    if price is not None and math.isfinite(price) and price > 0
+                })
+        except Exception as exc:  # noqa: BLE001 -- isolate unavailable quote sources
+            logger.warning("paper valuation snapshot unavailable: %s", exc)
+    if qs is not None and hasattr(qs, "paper_etf_snapshot"):
+        snapshot.update(qs.paper_etf_snapshot())
+    return snapshot
+
+
 @router.get("/overview")
 def overview(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
     """总览: 现金 + 持仓估值 + 账户状态。
@@ -147,19 +180,12 @@ def overview(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
     ov = paper.overview(data_dir, account_id=acc_id)
     ov["fees"] = {k: acc[k] for k in ("commission_pct", "stamp_tax_pct", "slippage_bps")}
 
-    # 盘中实时估算: 从行情服务的当日 enriched 快照取 raw_close (软失败, 降级日线)
-    qs = getattr(request.app.state, "quote_service", None)
-    if qs is not None and acc.get("status") == "active":
-        try:
-            enriched, enriched_date = qs.get_enriched_today()
-            from app.market_time import cn_today
-            if not enriched.is_empty() and enriched_date == cn_today() and ov.get("holdings"):
-                snapshot = dict(zip(enriched["symbol"].to_list(), enriched["raw_close"].to_list(), strict=False))
-                live = paper.overview(data_dir, snapshot, account_id=acc_id)
-                live["fees"] = ov["fees"]
-                return live
-        except Exception as e:
-            logger.warning("paper overview 实时估算失败, 降级日线口径: %s", e)
+    if acc.get("status") == "active" and ov.get("holdings"):
+        snapshot = _valuation_snapshot(request)
+        if snapshot:
+            live = paper.overview(data_dir, snapshot, account_id=acc_id)
+            live["fees"] = ov["fees"]
+            return live
     return ov
 
 
@@ -169,8 +195,13 @@ def create_order(request: Request, body: OrderModel, account: str = Query(paper.
     acc_id = _acc(request, account)
     asset_type = _resolve_asset_type(request, body.symbol)
     ref_price = body.ref_price
+    qs = getattr(request.app.state, "quote_service", None)
+    if ref_price is None and asset_type == "etf" and qs is not None:
+        ref_price = qs.paper_etf_snapshot().get(body.symbol)
     if ref_price is None:
         ref_price = _last_close(data_dir, body.symbol, asset_type)
+    if body.qty is None and body.amount is not None and ref_price is None:
+        raise HTTPException(status_code=400, detail="暂无可用参考价，请等待实时行情更新后重试，或改用数量下单")
     order, err = paper.create_order(
         data_dir, body.symbol, body.side,
         account_id=acc_id,
@@ -243,18 +274,7 @@ def compare_accounts(request: Request):
 
     # 盘中实时估算: 当日 enriched 快照就绪时取一次 raw_close 映射, 之后每账户
     # 纯内存 overview (与 /overview 实时口径一致); 失败降级定版口径
-    live_snapshot: dict[str, float] | None = None
-    qs = getattr(request.app.state, "quote_service", None)
-    if qs is not None:
-        try:
-            enriched, enriched_date = qs.get_enriched_today()
-            from app.market_time import cn_today
-            if not enriched.is_empty() and enriched_date == cn_today():
-                live_snapshot = dict(
-                    zip(enriched["symbol"].to_list(), enriched["raw_close"].to_list(), strict=False)
-                )
-        except Exception as e:  # noqa: BLE001 — 快照来源不定 (行情服务/数据缺失), 软失败降级定版口径
-            logger.warning("paper compare 实时快照不可用, 用定版口径: %s", e)
+    live_snapshot = _valuation_snapshot(request) or None
 
     rows = []
     for acc_id in paper.list_account_ids(data_dir):

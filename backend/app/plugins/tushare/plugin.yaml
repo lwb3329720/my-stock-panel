@@ -1,0 +1,9 @@
+name: tushare
+display_name: Tushare
+runtime: none
+entry: app.plugins.tushare.provider:TushareProvider
+check: app.plugins.tushare.provider:availability
+datasets: [daily, adj_factor, minute, financial]
+api_key_env: TUSHARE_TOKEN
+description: "原始日线与复权事件；财务、龙虎榜通过研究接口查询。权限以账户为准。"
+homepage: https://tushare.pro

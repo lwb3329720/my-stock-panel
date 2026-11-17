@@ -330,6 +330,7 @@ class QuoteService:
             self._fetched_at = 0.0      # 拉取完成的 Unix 时间戳 (毫秒)
         self._symbol_count: int = 0
         self._index_symbol_count: int = 0
+        self._paper_etf_records: list[dict] = []
         self._etf_symbol_count: int = 0
         self._index_quotes_cache: pl.DataFrame | None = None
         self._intraday_signal_evaluator = IntradaySignalEvaluator()
@@ -700,6 +701,17 @@ class QuoteService:
         if not self._repo or not getattr(self._repo, "store", None):
             return result
         wanted = self._quote_demand.symbols(self._repo.store.data_dir)
+        from app.strategy import paper
+        data_dir = self._repo.store.data_dir
+        for account_id in paper.list_account_ids(data_dir):
+            wanted.update(
+                symbol for symbol, pos in paper.load_positions(data_dir, account_id).items()
+                if pos["qty"] > 0
+            )
+            wanted.update(
+                order["symbol"] for order in paper.load_orders(data_dir, account_id)
+                if order["status"] == "pending" and order["order_type"] == "market"
+            )
         indices = self._repo.get_index_symbol_set()
         etf = self._repo.get_etf_instruments()
         etfs = set(etf["symbol"].to_list()) if not etf.is_empty() and "symbol" in etf.columns else set()
@@ -1121,6 +1133,7 @@ class QuoteService:
             self._fetched_at = fetched_at
             self._symbol_count = len(stock_records)
             self._etf_symbol_count = len(etf_records)
+            self._paper_etf_records = etf_records
             if replace_index_cache:
                 self._index_symbol_count = len(index_records)
                 self._index_quotes_cache = self._build_index_quotes(index_records)
@@ -1437,6 +1450,21 @@ class QuoteService:
     # 策略监控
     # ================================================================
 
+    def paper_etf_snapshot(self) -> dict[str, float]:
+        """Only fresh, timestamped raw ETF quotes can drive intraday fills."""
+        import math
+
+        now_ms = time.time() * 1000
+        with self._lock:
+            records = self._paper_etf_records
+        result = {}
+        for record in records:
+            price, timestamp = record.get("last_price"), record.get("timestamp")
+            if (isinstance(price, (int, float)) and math.isfinite(price) and price > 0
+                    and isinstance(timestamp, (int, float)) and 0 <= now_ms - timestamp <= 120_000):
+                result[record["symbol"]] = float(price)
+        return result
+
     def _evaluate_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None) -> None:
         """行情更新后评估统一监控规则引擎,并刷新策略结果缓存。"""
         try:
@@ -1608,9 +1636,9 @@ class QuoteService:
 
             # 模拟盘钩子: 与监控评估同频 —— ① 用同一份实时快照撮合 pending 即时单;
             # ② rule_events 喂给自动跟单规则触发自动下单。逐账户执行 (账户间规则与订单隔离)。
-            # 即时撮合仅股票 (ETF 即时单在下单时已转次日开盘); 独立 try ——
+            # ETF 使用带时间戳的原始快照; 独立 try ——
             # 模拟盘任何异常只留痕, 不得影响监控告警链路。
-            if stock_ready and self._app_state is not None:
+            if self._app_state is not None:
                 try:
                     from app.strategy import paper as paper_trading
                     from app.strategy import paper_auto
@@ -1619,7 +1647,8 @@ class QuoteService:
                         enriched_today["symbol"].to_list(),
                         enriched_today["raw_close"].to_list(),
                         strict=False,
-                    ))
+                    )) if stock_ready else {}
+                    snapshot.update(self.paper_etf_snapshot())
                     paper_events: list[dict] = []
                     for acc_id in paper_trading.list_account_ids(data_dir):
                         paper_events.extend(

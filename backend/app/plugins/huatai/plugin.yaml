@@ -1,0 +1,7 @@
+name: huatai
+display_name: 华泰 MCP
+runtime: none
+entry: app.plugins.huatai.provider:HuataiProvider
+check: app.plugins.huatai.provider:availability
+datasets: [daily, financial]
+description: "复用本机华泰 MCP：A股原始日线，成交量股转手。财务、经营、指数和宏观工具通过研究接口提供，保留来源和缓存时间。"
